@@ -1,0 +1,288 @@
+---
+title: "Genomics Project - Preliminary Model"
+author: "Chris Harden, Tomas Meade, Anna Golab"
+date: "3/5/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+set.seed(456)
+knitr::opts_chunk$set(echo = TRUE)
+# install.packages("BiocManager")
+# BiocManager::install("TCGAbiolinks")
+
+library(TCGAbiolinks)
+library(multimode)
+library(dplyr)
+library(rpart.plot)
+library(caTools)
+library(data.table)
+library(stringi)
+```
+
+## Data Preparation for gene clustering. 
+
+```{r}
+# query <- GDCquery(project = "TCGA-BRCA",
+#              data.category = "Copy Number Variation",
+#              data.type = "Gene Level Copy Number Scores",              
+#              access = "open")
+# GDCdownload(query)
+# brca_data <- GDCprepare(query)
+# saveRDS(brca_data, "brca_data.RDS")
+brca_data <- readRDS(file = "brca_data.RDS")
+
+focal_scores <- select(brca_data, -c("Gene ID", "Cytoband"))
+focal_scores_t <- transpose(focal_scores)
+rownames(focal_scores_t) <- colnames(focal_scores)
+colnames(focal_scores_t) <- focal_scores$`Gene Symbol`
+focal_scores_t$submitter_id <- colnames(focal_scores)
+focal_scores_t <- focal_scores_t[-1,]
+focal_scores_t$submitter_id <- stri_sub(focal_scores_t$submitter_id, 1,-17)
+focal_scores_t <- focal_scores_t[!duplicated(focal_scores_t$submitter_id),]
+
+HER2_CNS <- as.data.frame(t(as.data.frame(brca_data[substr(brca_data$`Gene Symbol`,1,15)
+                                                    =='ENSG00000141736',4:1109])))
+HER2_CNS$id <- rownames(HER2_CNS)
+HER2_CNS$status <- ifelse(HER2_CNS$V1 > 0, 1, 0)
+HER2_CNS <- HER2_CNS[!duplicated(substr(HER2_CNS$id, 1, 12)),]
+
+HRAS <- data.frame(id = rownames(focal_scores_t), 
+                   hras = abs(as.numeric(focal_scores_t$ENSG00000174775.15)))
+KRAS <- data.frame(id = rownames(focal_scores_t), 
+                   kras = abs(as.numeric(focal_scores_t$ENSG00000133703.10)))
+NRAS <- data.frame(id = rownames(focal_scores_t), 
+                   nras = abs(as.numeric(focal_scores_t$ENSG00000213281.4)))
+
+HER2 <- data.frame(id=HER2_CNS$id, her2=HER2_CNS$status)
+PTEN <- data.frame(id = rownames(focal_scores_t), 
+                   pten = abs(as.numeric(focal_scores_t$ENSG00000171862.8)))
+TP53 <- data.frame(id = rownames(focal_scores_t), 
+                   tp53 = abs(as.numeric(focal_scores_t$ENSG00000141510.14)))
+ERBB2 <- data.frame(id = rownames(focal_scores_t), 
+                    erbb2 = abs(as.numeric(focal_scores_t$ENSG00000141736.12)))
+PIK3CA <- data.frame(id = rownames(focal_scores_t), 
+                     pik3ca = abs(as.numeric(focal_scores_t$ENSG00000121879.3)))
+POLE <- data.frame(id = rownames(focal_scores_t), 
+                   pole = abs(as.numeric(focal_scores_t$ENSG00000177084.15)))
+
+RAS <- merge(HRAS, KRAS, by = "id") %>% merge(NRAS, by = "id")
+RAS$ras <- ifelse(RAS$hras == 0, ifelse(RAS$kras == 0, ifelse(RAS$nras == 0, 0, 1), 1), 1)
+RAS <- RAS %>% select(id, ras)
+```
+
+## Data Preparation for protein data
+
+```{r}
+# protein_data <- read.delim(paste0("gdc_download_20220225_235311.427006/8162d394-", 
+#                             "8b64-4da2-9f5b-d164c54b9608/nationwidechildrens", 
+#                             "_org_clinical_patient_brca.txt"), 
+#                            header = TRUE, sep = "\t", dec = ".")[-c(1:2),]
+protein_data <- read.csv("pr.csv", header = TRUE)
+
+ar_protein <- data.frame(ar = readRDS("ARexpression.rds"))
+AR <- data.frame(id = substr(rownames(ar_protein), 1, 12), ar = ar_protein$ar)
+AR <- AR %>% group_by(id) %>% 
+  summarize(ar = mean(ar))
+AR$ar <- ifelse(AR$ar > 0, 1, 0)
+
+er_status <- ifelse(protein_data$er_status_by_ihc == "Positive", 1, 0)
+pr_status <- ifelse(protein_data$pr_status_by_ihc == "Positive", 1, 0)
+
+ER <- data.frame(id = protein_data$bcr_patient_barcode, er=er_status)
+PR <- data.frame(id = protein_data$bcr_patient_barcode, pr=pr_status)
+# ER <- ER[which(ER$id %in% substr(RAS$id, 1, 12)),]
+# PR <- PR[which(PR$id %in% substr(RAS$id, 1, 12)), ]
+```
+
+## Data Preparation for CNV load
+
+```{r}
+# clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+# saveRDS(clin, "clin.rds")
+clin <- readRDS("clin.rds")
+clin <- clin[,c("submitter_id","gender","race","vital_status", "days_to_death", 
+                "days_to_last_follow_up", "age_at_index", "ajcc_pathologic_stage")]
+data <- merge(focal_scores_t, clin, by = "submitter_id")
+for (i in 2:19729){
+  data[,i] <- abs(as.numeric(data[,i]))
+}
+data <- select(data,-c("gender","race","vital_status", "days_to_death", 
+                "days_to_last_follow_up", "age_at_index", "ajcc_pathologic_stage"))
+data$row_sum <- rowSums(data[,2:19729])
+CNV_load <- data[,c('submitter_id','row_sum')]
+
+# Get patients with above average CNV load
+CNV_load$cnv_status <- ifelse(CNV_load$row_sum > median(CNV_load$row_sum), 1, 0)
+ggplot(CNV_load) +
+  geom_histogram(aes(x = row_sum), color = "black", fill = "white") + theme_classic() + 
+  xlab("CNV Load") +
+  ylab("Count")
+
+CNV <- data.frame(id = CNV_load$submitter_id, cnv = CNV_load$cnv_status)
+# CNV <- CNV[which(CNV$id %in% ER$id),]
+```
+
+## Data Preparation for hyper mutator status
+
+```{r}
+# mut_query <- GDCquery(project = "TCGA-BRCA", 
+#                    data.category = "Simple Nucleotide Variation", 
+#                    data.type = "Masked Somatic Mutation", 
+#                    legacy=F)
+# GDCdownload(mut_query, directory = "GDCdata/")
+# muts <- GDCprepare(mut_query, directory = "GDCdata/")
+# saveRDS(muts, "muts.RDS")
+mutations <- readRDS("muts.RDS")
+mutations$submitter_id <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
+mutator <- mutations %>% dplyr::count(submitter_id)
+
+# Get patients with above average mutations
+# ggplot(mutator) +
+#   geom_histogram(aes(x = n))
+hyper_mutator <- mutator$submitter_id[mutator$n > median(mutator$n)]
+hyper_mutator_status <- clin$submitter_id %in% hyper_mutator
+hyper_mutator_status <- as.numeric(hyper_mutator_status)
+
+MUT <- data.frame(id = clin$submitter_id, mut=hyper_mutator_status)
+# MUT <- MUT[which(MUT$id %in% ER$id),]
+```
+
+## Data Preparation for immune scores
+
+```{r}
+estimate_scores <- read.delim("breast_cancer_RNAseqV2.txt")
+estimate_scores$ID <- substring(estimate_scores$ID, 1, 12)
+# Find duplicates
+dup <- estimate_scores$ID[duplicated(estimate_scores$ID)]
+dup_all <- estimate_scores[estimate_scores$ID %in% dup,]
+# Remove duplicated
+estimate_scores <- estimate_scores[!(estimate_scores$ID %in% dup),]
+# Get mean of duplicates
+dup_mean <- dup_all %>% group_by(ID) %>%
+            summarise(Immune_score.mean = mean(Immune_score))
+# Set column names
+names(dup_mean) <- c("estimate_scores.ID", "estimate_scores.Immune_score")
+# Create immune scores data
+immune_score <- data.frame(estimate_scores$ID, estimate_scores$Immune_score)
+# Add average back for duplicates
+immune_score <- rbind(immune_score, dup_mean)
+# Set to binary
+ggplot(immune_score) +
+  geom_histogram(aes(x = estimate_scores.Immune_score), color = "black", fill = "white") + 
+  theme_classic() + 
+  xlab("Immune Score") + 
+  ylab("Count")
+ave <- 0 # mean(immune_score$estimate_scores.Immune_score)
+immune_score <- immune_score %>%
+  mutate(immune_score.binary = if_else(estimate_scores.Immune_score > ave, 1, 0))
+IS <- data.frame(id = immune_score$estimate_scores.ID, is = immune_score$immune_score.binary)
+# # Plot density
+# locmodes(immune.scores, mod0=2, display=TRUE)
+# # Check with clinical data
+# new_data <- merge(clin, immune_score, by.x = "submitter_id", by.y = "estimate_scores.ID")
+```
+
+## Combining data sets for modeling
+
+```{r}
+get_id <- function(data) {
+  substr(data$id, 1, 12)
+}
+HER2$id <- get_id(HER2)
+PTEN$id <- get_id(PTEN)
+TP53$id <- get_id(TP53)
+ERBB2$id <- get_id(ERBB2)
+RAS$id <- get_id(RAS)
+PIK3CA$id <- get_id(PIK3CA)
+POLE$id <- get_id(POLE)
+
+merge2 <- function(x, data) {
+  merge(x, data, by = "id", all.x = T)
+}
+full_set <- data.frame(id = clin$submitter_id) %>%
+  merge2(ER) %>%
+  merge2(PR) %>%
+  merge2(HER2) %>%
+  merge2(CNV) %>%
+  merge2(MUT) %>%
+  merge2(PTEN) %>%
+  merge2(TP53) %>%
+  merge2(ERBB2) %>%
+  merge2(RAS) %>%
+  merge2(PIK3CA) %>%
+  merge2(POLE) %>%
+  merge2(AR) %>% 
+  merge2(IS)
+
+# saveRDS(full_set, "full_set.rds")
+```
+
+## Cluster Analysis
+
+```{r}
+full_set <- readRDS("full_set.rds")
+
+full_clean <- na.omit(full_set)
+dist_data <- full_clean[, 2:ncol(full_clean)]
+dist_data$int <- 1
+
+# calculate distance metric
+d_dist <- as.dist(1-cor(t(dist_data), method="pearson"))
+
+# hierarchical clustering
+hc <- hclust(d_dist, method = "ward.D")
+
+# dendrogram 
+par(mar=c(0, 4, 4, 2)) # c(bottom, left, top, right)
+plot(hc, labels=FALSE, main = "Genetic Cluster of Patients", 
+     ylab = "", yaxt = 'n', hang = -1, sub = "", xlab = "")
+rect.hclust(hc, k=5, border="red")
+
+# choose k, number of clusters 
+cluster <- data.frame(id = full_clean$id, clus = cutree(hc, k=5))
+
+# add cluster to original data 
+full_set <- merge(full_set, cluster, by="id", all.x = T)
+```
+
+## Decision Tree
+
+```{r}
+data <- full_set
+
+colnames(data) <- c("id", "er_pos", "pr_pos", "her2_amp", "cnv_load", "hyper_mut", "pten_mut", 
+         "tp53_mut", "erbb2_mut", "h.k.n.ras_mut", "pik3ca_mut", "pole_mut", "ar_pos", "immune", "clus")
+
+data <- data %>% 
+  mutate(clus = factor(clus)) %>% 
+  select(clus, er_pos, pr_pos, ar_pos, her2_amp, cnv_load, hyper_mut, immune, pten_mut, 
+         tp53_mut, erbb2_mut, h.k.n.ras_mut, pik3ca_mut, pole_mut)
+
+sample_data <- sample.split(data, SplitRatio = .8)
+train_data <- subset(data, sample_data == TRUE)
+test_data <- subset(data, sample_data == FALSE)
+
+# Create decision tree
+rtree <- rpart(clus ~ ., train_data, control = rpart.control(maxdepth = 6))
+rpart.plot(rtree)
+
+#Test tree on test data
+test <- predict(rtree, test_data, type = "class")
+
+#Accuracy
+sum(test == test_data$clus, na.rm = T) / length(na.omit(test_data$clus))
+```
+
+```{r}
+surv <- merge(clin, na.omit(full_set), by.x = "submitter_id", by.y="id")
+TCGAanalyze_survival(surv,
+                     clusterCol= "clus",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     color = c("Dark2") , xlim = 3650
+                     )
+
+# rm(clin)
+```
+

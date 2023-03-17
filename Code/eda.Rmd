@@ -1,0 +1,156 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+
+brca_data <- readRDS(file = "brca_data.RDS")
+
+head(rowData(brca_data))    #ensembl id and gene id of the first 6 genes.
+
+dim(brca_data)
+colnames(colData(brca_data))
+colnames(rowRanges(brca_data))
+head(brca_data@rowRanges)
+head(brca_data@assays)
+
+table(brca_data@colData$vital_status)
+table(brca_data@colData$definition)
+table(brca_data@colData$tissue_or_organ_of_origin)
+table(brca_data@colData$gender)
+table(brca_data@colData$race)
+
+length((brca_data@colData$patient))
+
+
+
+```
+
+
+
+```{r}
+
+# Packages
+
+suppressMessages({
+    library(TCGAbiolinks)
+    library(MultiAssayExperiment)
+    library(maftools)
+    library(dplyr)
+    library(ComplexHeatmap)
+})
+
+
+```
+
+
+```{r}
+
+# Clinical
+
+clinical <- GDCquery_clinic("TCGA-BRCA")
+head(clinical)
+
+
+```
+
+```{r}
+
+# Mutation and Clinical Data
+
+mut <- GDCquery_Maf(tumor = "BRCA", pipelines = "mutect")
+clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+clin <- clin[,c("bcr_patient_barcode","disease","gender","race","vital_status")]
+
+genes = mut$Hugo_Symbol[mut$Hugo_Symbol %in% c("PTEN", 
+                                               "TP53", 
+                                               "HRAS", 
+                                               "KRAS", 
+                                               "NRAS", 
+                                               "ERBB2", 
+                                               "PIK3CA", 
+                                               "POLE")]
+
+TCGAvisualize_oncoprint(mut = mut, genes = genes,
+                        filename = "oncoprint.pdf",
+                        annotation = clin,
+                        color=c("background"="#CCCCCC","DEL"="purple","INS"="yellow","SNP"="brown"),
+                        rows.font.size=10,
+                        width = 5,
+                        heatmap.legend.side = "right",
+                        dist.col = 0,
+                        label.font.size = 10)
+
+
+```
+ 
+
+```{r}
+
+# CNV
+
+query <- GDCquery(
+  project = "TCGA-BRCA",
+  data.category = "Copy Number Variation",
+  data.type = "Gene Level Copy Number Scores",
+  access="open")
+
+GDCdownload(query = query)
+brca_data <- GDCprepare(query)
+
+saveRDS(object = brca_data,
+        file = "brca_data.RDS",
+        compress = FALSE)
+brca_data <- readRDS(file = "brca_data.RDS")
+
+
+#Histogram
+library(data.table)
+HER2_CNS <- transpose(as.data.frame(brca_data[substr(brca_data$`Gene Symbol`,1,15)=='ENSG00000141736',4:ncol(brca_data)]))
+
+plot(density(HER2_CNS$V1))
+
+```
+
+
+```{r}
+
+query <- GDCquery(project = "TCGA-BRCA",
+             data.category = "Copy Number Variation",
+             data.type = "Gene Level Copy Number Scores",              
+             access = "open")
+
+GDCdownload(query)
+scores <- GDCprepare(query)
+head(scores)
+
+```
+
+
+```{r}
+
+# Remove metadata from the first 3 columns
+scores.matrix <- scores %>% dplyr::select(-c(1:3)) %>% as.matrix
+
+rownames(scores.matrix) <- paste0(scores$`Gene Symbol`,"_", scores$Cytoband)
+
+# Gain in more than 250 samples
+gain.more.than.twohundred.samples <- which(rowSums(scores.matrix == 1) > 250)
+
+# Loss in more than 185 samples
+loss.more.than.twohundred.samples <- which(rowSums(scores.matrix == -1) > 185)
+
+lines.selected <- c(gain.more.than.twohundred.samples,loss.more.than.twohundred.samples)
+
+Heatmap(scores.matrix[lines.selected,],
+        show_column_names = FALSE, 
+        show_row_names = TRUE,
+        row_names_gp = gpar(fontsize = 8),
+        col = circlize::colorRamp2(c(-1,0,1), colors = c("black","dodgerblue","yellow")))
+
+
+```
+
+

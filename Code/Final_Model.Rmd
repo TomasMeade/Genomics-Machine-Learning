@@ -1,0 +1,208 @@
+---
+title: "Genomics Project - Preliminary Model"
+author: "Chris Harden, Tomas Meade, Anna Golab"
+date: "3/5/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+set.seed(456)
+knitr::opts_chunk$set(echo = TRUE)
+# install.packages("BiocManager")
+# BiocManager::install("TCGAbiolinks")
+# You can skip to line 225 to run results
+
+library(TCGAbiolinks)
+library(multimode)
+library(dplyr)
+library(rpart.plot)
+library(caTools)
+library(survival)
+```
+
+## Cluster Analysis
+
+```{r}
+set.seed(161)
+clin <- readRDS("clin.rds")
+full_set <- readRDS("full_set.rds")
+
+full_clean <- na.omit(full_set)
+dist_data <- full_clean[, 2:ncol(full_clean)]
+dist_data$int <- 1
+
+# calculate distance metric
+d_dist <- as.dist(1-cor(t(dist_data), method="pearson"))
+
+# hierarchical clustering
+hc <- hclust(d_dist, method = "ward.D")
+
+# dendrogram 
+par(mar=c(0, 4, 4, 2)) # c(bottom, left, top, right)
+plot(hc, labels=FALSE, main = "Genetic Cluster of Patients", 
+     ylab = "", yaxt = 'n', hang = -1, sub = "", xlab = "")
+rect.hclust(hc, k=5, border="red")
+
+# choose k, number of clusters 
+cluster <- data.frame(id = full_clean$id, clus = cutree(hc, k=5))
+
+# add cluster to original data 
+full_set <- merge(full_set, cluster, by="id", all.x = T)
+```
+
+## Decision Tree
+
+```{r}
+set.seed(161)
+data <- full_set
+
+colnames(data) <- c("id", "er_pos", "pr_pos", "her2_amp", "cnv_load", "hyper_mut", "pten_mut", 
+         "tp53_mut", "erbb2_mut", "h.k.n.ras_mut", "pik3ca_mut", "pole_mut", "ar_pos", "immune", "clus")
+
+data <- data %>% 
+  mutate(clus = factor(clus)) %>% 
+  select(clus, er_pos, pr_pos, ar_pos, her2_amp, cnv_load, hyper_mut, immune, pten_mut, 
+         tp53_mut, erbb2_mut, h.k.n.ras_mut, pik3ca_mut, pole_mut)
+
+sample_data <- sample.split(data, SplitRatio = .8)
+train_data <- subset(data, sample_data == TRUE)
+test_data <- subset(data, sample_data == FALSE)
+
+# Create decision tree
+rtree <- rpart(clus ~ ., train_data, control = rpart.control(maxdepth = 4))
+rpart.plot(rtree)
+
+#Test tree on test data
+test <- predict(rtree, test_data, type = "class")
+
+#Accuracy
+sum(test == test_data$clus, na.rm = T) / length(na.omit(test_data$clus))
+
+results <- predict(rtree, data, type = "class")
+```
+
+```{r, message=FALSE}
+set.seed(161)
+# Survival plot with original data
+surv <- merge(clin, na.omit(full_set), by.x = "submitter_id", by.y="id")
+TCGAanalyze_survival(surv,
+                     clusterCol= "clus",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     color = c("Dark2") , xlim = (10*365),
+                     filename = "clus_surv.pdf",
+                     pvalue = FALSE
+                     )
+
+pred_set <- full_set
+pred_set$clus <- results
+pred_surv <- merge(clin, na.omit(pred_set), by.x = "submitter_id", by.y="id")
+TCGAanalyze_survival(pred_surv,
+                     clusterCol= "clus",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     color = c("Dark2") , xlim = 10*365,
+                     filename = "pred_surv.pdf",
+                     pvalue = FALSE
+                     )
+
+tumor_surv <- filter(pred_surv, !is.na(ajcc_pathologic_stage), ajcc_pathologic_stage != "Stage X")
+tumor_surv$ajcc_pathologic_stage <- ifelse(substr(tumor_surv$ajcc_pathologic_stage,
+                                                  nchar(tumor_surv$ajcc_pathologic_stage),
+                                                  nchar(tumor_surv$ajcc_pathologic_stage)) %in% c("I", "V"),
+                                           tumor_surv$ajcc_pathologic_stage, substr(tumor_surv$ajcc_pathologic_stage, 1,
+                                                  nchar(tumor_surv$ajcc_pathologic_stage)-1))
+
+sfit_data <- surv
+sfit_data$vital_status <- as.factor(sfit_data$vital_status)
+# 1 is Alive, 2 is Dead
+sfit_data$vital_status <- as.integer(sfit_data$vital_status)
+sfit1 <- survfit(Surv(days_to_death, vital_status)~clus, data=sfit_data)
+# summary(sfit)
+
+sfit_pred <- pred_surv
+sfit_pred$vital_status <- as.factor(sfit_pred$vital_status)
+sfit_pred$vital_status <- as.integer(sfit_pred$vital_status)
+sfit2 <- survfit(Surv(days_to_death, vital_status)~clus, data=sfit_pred)
+# summary(sfit)
+
+cox_data <- sfit_data
+cox_data <- filter(cox_data, !is.na(ajcc_pathologic_stage), ajcc_pathologic_stage != "Stage X")
+cox_data$ajcc_pathologic_stage <- ifelse(substr(cox_data$ajcc_pathologic_stage,
+                                                  nchar(cox_data$ajcc_pathologic_stage),
+                                                  nchar(cox_data$ajcc_pathologic_stage)) %in% c("I", "V"),
+                                           cox_data$ajcc_pathologic_stage, substr(cox_data$ajcc_pathologic_stage, 1,
+                                                  nchar(cox_data$ajcc_pathologic_stage)-1))
+cox_data$ajcc_pathologic_stage <- as.factor(cox_data$ajcc_pathologic_stage)
+fit <- coxph(Surv(days_to_death, vital_status)~ajcc_pathologic_stage, data=cox_data)
+# summary(fit)
+# extractAIC(fit)[2]
+# CoxR2::coxr2(fit)
+
+# new_fit <- coxph(Surv(days_to_death, vital_status)~ajcc_pathologic_stage + erbb2, data=cox_data)
+# summary(new_fit)
+# extractAIC(new_fit)[2]
+# CoxR2::coxr2(new_fit)
+# 
+# clus_fit <- coxph(Surv(days_to_death, vital_status)~clus, data=cox_data)
+# summary(clus_fit)
+# extractAIC(clus_fit)[2]
+# CoxR2::coxr2(clus_fit)
+
+best_fit <- coxph(Surv(days_to_death, vital_status)~clus+ajcc_pathologic_stage, data=cox_data)
+# summary(best_fit)
+# extractAIC(best_fit)[2]
+# CoxR2::coxr2(best_fit)
+```
+
+```{r}
+set.seed(161)
+sample_data <- sample.split(cox_data, SplitRatio = .7)
+train_data <- subset(cox_data, sample_data == TRUE)
+test_data <- subset(cox_data, sample_data == FALSE)
+
+test_stage_fit <- coxph(Surv(days_to_death, vital_status)~ajcc_pathologic_stage, data=train_data)
+# summary(test_stage_fit)
+# extractAIC(test_stage_fit)[2]
+# CoxR2::coxr2(test_stage_fit)
+test_clus_fit <- coxph(Surv(days_to_death, vital_status)~ajcc_pathologic_stage + clus, data=train_data)
+# summary(test_clus_fit)
+# extractAIC(test_clus_fit)[2]
+# CoxR2::coxr2(test_clus_fit)
+
+mresid <- (test_data$vital_status-1) - predict(test_stage_fit, test_data, type = "expected")
+mresid2 <- (test_data$vital_status-1) - predict(test_clus_fit, test_data, type = "expected")
+
+# plot(mresid)
+# plot(mresid2)
+# plot(survfit(Surv(days_to_death, vital_status)~gender, data=sfit_data))
+```
+
+```{r, message=FALSE}
+set.seed(161)
+
+tumor_surv$newcol <- ifelse(tumor_surv$ajcc_pathologic_stage %in% c("Stage I", "Stage II"), "Early", "Late")
+stage1 <- filter(tumor_surv, newcol == "Early")
+TCGAanalyze_survival(stage1,
+                     clusterCol= "clus",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     color = c("Dark2") , xlim = 10*365,
+                     filename = "early_stage.pdf",
+                     pvalue = FALSE
+                     )
+
+stage2 <- filter(tumor_surv, newcol == "Late")
+TCGAanalyze_survival(stage2,
+                     clusterCol= "clus",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     color = c("Dark2") , xlim = 10*365,
+                     filename = "late_stage.pdf",
+                     pvalue = FALSE
+                     )
+
+
+
+```
+

@@ -1,0 +1,542 @@
+---
+title: "EDA_BRCA_project"
+author: "Tomas Meade, Chris Harden, Anna Golab"
+date: "21/02/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# install.packages("BiocManager")
+# BiocManager::install("TCGAbiolinks")
+# BiocManager::install("ComplexHeatmap")
+# BiocManager::install("survminer")
+
+knitr::opts_chunk$set(echo = TRUE)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(ComplexHeatmap)
+library(survminer)
+library(ComplexHeatmap)
+library(cluster)
+library(stringi)
+```
+
+In the following paper we will focus our analysis on how different features can influence the severity of the cancer. Namely we will prove that HER2 positive cancers tend to spread faster and are more severe. We will utilize unsupervised learning to uncover other significant features. We will also seek to reduce dimensions in resulting clusters. 
+
+```{r}
+#Projects available
+GDCprojects <- getGDCprojects()
+head(GDCprojects[c("project_id", "name")])
+
+#BRCA project
+TCGAbiolinks:::getProjectSummary("TCGA-BRCA")
+```
+
+1. Clinical Data Analysis.
+
+We are analyzing a list of 1,098 Breast Cancer cases. Below we present the distribution of cancer cases categorized by gender, age and other demographics variables.
+ 
+```{r, warning = FALSE}
+#Clinical Data
+clinical_data <- GDCquery_clinic("TCGA-BRCA","clinical")
+p <- ggplot(clinical_data, aes(x=age_at_index, color=gender)) +
+  geom_histogram(fill="white", position="dodge", bins = 30, identity="")+
+  xlab("age")+
+  theme(legend.position="top")
+p
+```
+
+```{r}
+no_ethnic_na <- filter(clinical_data, !is.na(ethnicity), ethnicity!="not reported")
+
+p <- ggplot(no_ethnic_na, aes(x=ethnicity)) + 
+  geom_bar(aes(y = ..count../sum(..count..)), color="black", fill="white") +
+  ylab("proportion of cases")
+p
+```
+
+```{r}
+no_race_na <- filter(clinical_data, !is.na(race), race != "not reported")
+
+p <- ggplot(no_race_na, aes(x=race)) + 
+  geom_bar(aes(y=..count../sum(..count..)), color="black", fill="white") +
+  theme(axis.text.x = element_text(angle = 50, hjust=1)) +
+  ylab("proportion of cases")
+p
+```
+
+```{r}
+no_ajcc_na <- filter(clinical_data, !is.na(ajcc_pathologic_stage), ajcc_pathologic_stage != "Stage X")
+no_ajcc_na <- select(no_ajcc_na, ajcc_pathologic_stage, vital_status)
+no_ajcc_na$vital_status <- as.factor(no_ajcc_na$vital_status)
+no_ajcc_na$ajcc_pathologic_stage <- ifelse(substr(no_ajcc_na$ajcc_pathologic_stage, nchar(no_ajcc_na$ajcc_pathologic_stage), nchar(no_ajcc_na$ajcc_pathologic_stage)) %in% c("I", "V"), no_ajcc_na$ajcc_pathologic_stage, substr(no_ajcc_na$ajcc_pathologic_stage, 1, nchar(no_ajcc_na$ajcc_pathologic_stage)-1))
+no_ajcc_na <- group_by(no_ajcc_na, ajcc_pathologic_stage) %>% count(vital_status) %>% mutate(Percent = n / sum(n)*100)
+
+ggplot(no_ajcc_na, aes(x = ajcc_pathologic_stage, y = Percent, fill = vital_status))+
+  geom_bar(stat = "identity")+
+  xlab("AJCC pathologic stage")
+p
+```
+
+> TODO: 
+Days to last follow up
+Treatment/therapy yes/no
+days to death (survival analysis)
+
+2. HER 2 analysis.
+
+HER 2 amplifications can increase the severity of cancer. Amplification or overexpression of HER2 has been shown to be associated with shorter disease-free survival and poorer overall survival in breast cancers. We can look at the amount of HER 2 gene amplifications in our sample. 
+
+```{r, warning=FALSE, message=FALSE}
+#Gene Level Copy Number Scores query.
+# query <- GDCquery(
+#   project = "TCGA-BRCA",
+#   data.category = "Copy Number Variation",
+#   data.type = "Gene Level Copy Number Scores",
+#   access="open")
+# 
+# GDCdownload(query = query)
+# brca_data <- GDCprepare(query)
+# saveRDS(object = brca_data,
+#         file = "brca_data.RDS",
+#         compress = FALSE)
+brca_data <- readRDS(file = "brca_data.RDS")
+
+```
+
+```{r}
+#Histogram of Copy Number Score for HER2.
+HER2_CNS <- as.data.frame(t(as.data.frame(brca_data[substr(brca_data$`Gene Symbol`,1,15)=='ENSG00000141736',4:1109])))
+
+ggplot(data = HER2_CNS, mapping = aes(x = V1)) +
+  geom_bar(aes(y=..prop..), fill = "pink", color = "black") +
+  ggtitle("HER2 Mutations Distribution") +
+  xlab("-1: gene deletion, 0: no gene mutation, 1: gene amplification") +
+  ylab("Proportion") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = .5))
+```
+
+> TODO
+HER2 bar graph: x-axis is stage (4 stages), stacked bars show 1s, 0s, -1s
+survival analysis based on HER2 (see bottom code)
+
+```{r}
+# which(clinical_data$submitter_id %in% substr(rownames(HER2_CNS), 1, 12))
+```
+
+Survival analysis based on race clusters. 
+```{r, message=FALSE}
+clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+ 
+clin <- filter(clin, race != "not reported")
+TCGAanalyze_survival(clin,
+                     clusterCol= "race",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     color = c("Dark2"), 
+                     xlim = 4000)
+```
+
+```{r}
+#protein_data <- read.delim("gdc_download_20220225_235311.427006/8162d394-8b64-4da2-9f5b-d164c54b9608/nationwidechildrens_org_clinical_patient_brca.txt", header = TRUE, sep = "\t", dec = ".")[-c(1:2),]
+protein_data <- read.csv("pr.csv", header = TRUE)
+
+ggplot(data = protein_data, mapping = aes(x = pr_status_by_ihc)) +
+  geom_bar(aes(y = (..count..)/sum(..count..)), fill = "pink", color = "black") +
+  ggtitle("Progesterone Receptor (PR) Distribution")+
+  xlab("Progesterone receptor")+
+  ylab("Proportion") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = .5))
+```
+
+
+```{r}
+ggplot(data = protein_data, mapping = aes(x = er_status_by_ihc)) +
+  geom_bar(aes(y = (..count..)/sum(..count..)), fill = "pink", color = "black") +
+  ggtitle("Estrogen Receptor (ER) Distribution")+
+  xlab("Estrogen receptor")+
+  ylab("Proportion") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = .5))
+```
+
+3. Other genes analysis. 
+
+It may be worth analysing what are other genes mutated for our patients. One thing to look for is which can be linked to higher survival.
+
+```{r, warning=FALSE, message=FALSE}
+# Mutations of genes linked to survival in literature. 
+mut <- GDCquery_Maf(tumor = "BRCA", pipelines = "mutect")
+clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+clin <- clin[,c("bcr_patient_barcode","disease","gender","race","vital_status")]
+TCGAvisualize_oncoprint(mut = mut, genes = mut$Hugo_Symbol[1:20],
+                        filename = "oncoprint.pdf",
+                        annotation = clin,
+                        color=c("background"="#CCCCCC","DEL"="purple","INS"="yellow","SNP"="brown"),
+                        rows.font.size=10,
+                        width = 5,
+                        heatmap.legend.side = "right",
+                        dist.col = 0,
+                        label.font.size = 10)
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Mutation and Clinical Data Plot with Genes of Interest.
+mut <- GDCquery_Maf(tumor = "BRCA", pipelines = "mutect")
+clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+clin <- clin[,c("bcr_patient_barcode", "gender","race","vital_status")]
+
+genes = mut$Hugo_Symbol[mut$Hugo_Symbol %in% c("PTEN", 
+                                               "TP53", 
+                                               "HRAS", 
+                                               "KRAS", 
+                                               "NRAS", 
+                                               "ERBB2", 
+                                               "PIK3CA", 
+                                               "POLE")]
+
+TCGAvisualize_oncoprint(mut = mut, genes = genes,
+                        filename = "oncoprint.pdf",
+                        annotation = clin,
+                        color=c("background"="#CCCCCC","DEL"="purple","INS"="yellow","SNP"="brown"),
+                        rows.font.size=10,
+                        width = 5,
+                        heatmap.legend.side = "right",
+                        dist.col = 0,
+                        label.font.size = 10)
+```
+
+<!-- > SNP = Single Nucleotide Polymorphism -->
+<!-- DEL, INS, SNP come from variant class column -->
+
+4. Cluster analysis. Finding correct clustering mechanism can help predicting survival rates. We investigate different grouping of the data to arrive with high survival rate accuracy prediction. 
+
+
+```{r, warning=FALSE, message=FALSE}
+#Data Preparation for gene clustering. 
+query <- GDCquery(project = "TCGA-BRCA",
+             data.category = "Copy Number Variation",
+             data.type = "Gene Level Copy Number Scores",              
+             access = "open")
+
+GDCdownload(query)
+scores <- GDCprepare(query)
+head(scores)
+focal_scores <- select(scores, -c("Gene ID", "Cytoband"))
+```
+
+```{r}
+
+scores <- brca_data
+focal_scores <- select(brca_data, -c("Gene ID", "Cytoband"))
+```
+
+
+Clustering based on different gene mutation (amplification / deletion color mapped).
+```{r}
+
+# Clustering with just focal scores
+
+# Remove metadata from the first 3 columns
+scores.matrix <- scores %>% dplyr::select(-c(1:3)) %>% as.matrix
+
+rownames(scores.matrix) <- paste0(scores$`Gene Symbol`,"_", scores$Cytoband)
+
+# Gain in more than 250 samples
+gain.more.than.twohundred.samples <- which(rowSums(scores.matrix == 1) > 250)
+
+# Loss in more than 185 samples
+loss.more.than.twohundred.samples <- which(rowSums(scores.matrix == -1) > 185)
+
+lines.selected <- c(gain.more.than.twohundred.samples,loss.more.than.twohundred.samples)
+
+# Plot of clustered heatmap
+Heatmap(scores.matrix[lines.selected,], name = "Focal Score",
+        column_title = "Samples",
+        row_title = "Genes",
+        show_column_names = F, 
+        row_labels = substr(rownames(scores.matrix[lines.selected,]), 1, 15),
+        show_row_names = TRUE,
+        row_names_gp = gpar(fontsize = 8),
+        col = circlize::colorRamp2(c(-1,0,1), colors = c("black","dodgerblue","yellow")))
+```
+
+```{r}
+
+# Clustering with more features
+
+# Cleaning and Merging clinical focal scores data
+
+focal_scores_t <- transpose(focal_scores)
+
+colnames(focal_scores_t) <- focal_scores$`Gene Symbol`
+
+focal_scores_t$submitter_id <- colnames(focal_scores)
+
+focal_scores_t <- focal_scores_t[-1,]
+
+focal_scores_t$submitter_id <- stri_sub(focal_scores_t$submitter_id, 1,-17)
+
+focal_scores_t <- focal_scores_t[!duplicated(focal_scores_t$submitter_id),]
+
+# Gain in more than 250 samples
+gain.more.than.twohundred.samples <- which(colSums(focal_scores_t == 1) > 250)
+
+# Loss in more than 185 samples
+loss.more.than.twohundred.samples <- which(colSums(focal_scores_t == -1) > 185)
+
+lines.selected <- c(gain.more.than.twohundred.samples,loss.more.than.twohundred.samples)
+
+scores_select_genes <- focal_scores_t[, lines.selected]
+
+scores_select_genes$submitter_id <- focal_scores_t$submitter_id
+
+clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+clin <- clin[,c("submitter_id","gender","race","vital_status", "age_at_index", "ajcc_pathologic_stage")]
+
+data <- merge(scores_select_genes, clin, by = "submitter_id")
+
+# Clustering
+
+# Uses hclust function by default with agglomerative clustering and grower distance
+
+x <- data[, 2:ncol(data)]
+
+X <- x %>% mutate_if(is.character, as.factor)
+# str(X)
+
+# calculate distance
+d_dist <- daisy(X, metric = "grower")
+
+# hierarchical clustering
+hc <- hclust(d_dist, method = "complete")
+
+# dendrogram 
+par(mar=c(0, 4, 4, 2)) # c(bottom, left, top, right)
+plot(hc, labels=FALSE, main = "Gene & Clinical Cluster of Patients", ylab = "", yaxt = 'n', hang = -1, sub = "", xlab = "")
+rect.hclust(hc, k=5, border="red")
+
+# choose k, number of clusters 
+cluster <- cutree(hc, k=5)
+
+# add cluster to original data 
+data <- cbind(data, as.factor(cluster))
+
+
+```
+
+5. survival - HER2
+```{r}
+clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+clin <- clin[,c("submitter_id","gender","race","vital_status", "days_to_death", "days_to_last_follow_up", "age_at_index", "ajcc_pathologic_stage")]
+scores_select_genes$ENSG00000141736 <- focal_scores_t$ENSG00000141736
+data <- merge(scores_select_genes, clin, by = "submitter_id")
+
+# unique(data$ajcc_pathologic_stage)
+stage1 <- data[data$ajcc_pathologic_stage == "Stage I" | data$ajcc_pathologic_stage == "Stage IA" | data$ajcc_pathologic_stage == "Stage IB", ]
+TCGAanalyze_survival(stage1,
+                     clusterCol= "ENSG00000141736",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     labels=c("HER2 deletion","HER2 no mutation","HER2 amplification"),
+                     filename = "surv1.pdf",
+                     color = c("Dark2"))
+stage2 <- data[data$ajcc_pathologic_stage == "Stage II" | data$ajcc_pathologic_stage == "Stage IIA" | data$ajcc_pathologic_stage == "Stage IIB", ]
+TCGAanalyze_survival(stage2,
+                     clusterCol= "ENSG00000141736",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     labels=c("HER2 deletion","HER2 no mutation","HER2 amplification"),
+                     filename = "surv2.pdf",
+                     color = c("Dark2"))
+stage3 <- data[data$ajcc_pathologic_stage == "Stage III" | data$ajcc_pathologic_stage == "Stage IIIA" | data$ajcc_pathologic_stage == "Stage IIIB" | data$ajcc_pathologic_stage == "Stage IIIC", ]
+TCGAanalyze_survival(stage3,
+                     clusterCol= "ENSG00000141736",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     labels=c("HER2 deletion","HER2 no mutation","HER2 amplification"),
+                     filename = "surv3.pdf",
+                     color = c("Dark2"))
+stage4 <- data[data$ajcc_pathologic_stage == "Stage IV", ]
+TCGAanalyze_survival(stage4,
+                     clusterCol= "ENSG00000141736",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     labels=c("HER2 deletion","HER2 no mutation","HER2 amplification"),
+                     filename = "surv4.pdf",
+                     color = c("Dark2"))
+stage5 <- data[data$ajcc_pathologic_stage == "Stage X", ]
+TCGAanalyze_survival(stage5,
+                     clusterCol= "ENSG00000141736",
+                     risk.table = FALSE,
+                     conf.int = FALSE,
+                     labels=c("HER2 deletion","HER2 no mutation","HER2 amplification"),
+                     filename = "surv5.pdf",
+                     color = c("Dark2"))
+```
+
+
+```{r}
+
+# ER and PR
+
+library(readr)
+er_pr <- read_tsv("nationwidechildrens.org_clinical_patient_brca.txt")
+
+er_pr$days_to_death <- er_pr$death_days_to
+
+er_pr$days_to_last_follow_up <- er_pr$last_contact_days_to
+
+```
+
+
+
+```{r}
+
+query1 <- GDCquery( project = "TCGA-BRCA", data.category = "Simple Nucleotide Variation", data.type = "Masked Somatic Mutation", legacy=F)
+
+GDCdownload(query1, directory = "GDCdata/")
+
+muts <- GDCprepare(query1, directory = "GDCdata/")
+
+# Look at all patients present in the mutation data
+unique(substr(muts$Tumor_Sample_Barcode, 1, 12))
+
+# Add column with only patient ID
+muts$submitter_id <- substr(muts$Tumor_Sample_Barcode, 1, 12)
+
+# Count number of mutations per patient
+library( "dplyr")
+mutator <- muts %>% count(submitter_id)
+
+# Get patients with more than 50 mutations
+hyper_mutator <- mutator$submitter_id[mutator$n > 50]
+
+# Create column with hypermutator status
+hyper_mutator_status <- clin$submitter_id %in% hyper_mutator
+
+# Verify
+sum(hyper_mutator_status)
+
+hyper_mutator_status <- as.numeric(hyper_mutator_status)
+hyper_mutator_status[1:30]
+
+```
+
+
+
+```{r}
+
+focal_scores_t <- transpose(focal_scores)
+colnames(focal_scores_t) <- focal_scores$`Gene Symbol`
+focal_scores_t$submitter_id <- colnames(focal_scores)
+focal_scores_t <- focal_scores_t[-1,]
+focal_scores_t$submitter_id <- stri_sub(focal_scores_t$submitter_id, 1,-17)
+focal_scores_t <- focal_scores_t[!duplicated(focal_scores_t$submitter_id),]
+clin <- GDCquery_clinic("TCGA-BRCA","clinical")
+clin <- clin[,c("submitter_id","gender","race","vital_status", "age_at_index", "ajcc_pathologic_stage")]
+data <- merge(focal_scores_t, clin, by = "submitter_id")
+for (i in 2:19729){
+  data[,i] <- abs(as.numeric(data[,i]))
+}
+data <- select(data,-c("gender","race","vital_status", "age_at_index", "ajcc_pathologic_stage"))
+data$row_wise_sum
+data$row_sum <- rowSums(data[,2:19729])
+CNV_load <- data[,c('submitter_id','row_sum')]
+library(multimode)
+locmodes(CNV_load$row_sum,mod0=2,display=TRUE)
+
+```
+
+
+```{r}
+
+full_set <- readRDS("final_data.RDS")
+X_full <- full_set[, 2:ncol(full_set)]
+hc_full <- hclust(as.dist(1-cor(t(X_full), method="pearson")), method="ward.D")
+
+# dendrogram 
+par(mar=c(0, 4, 4, 2)) # c(bottom, left, top, right)
+plot(hc_full, labels=FALSE, main = "Clustering of Patients Using Genomic Data", ylab = "", yaxt = 'n', hang = -1, sub = "", xlab = "")
+rect.hclust(hc_full, k=5, border="red")
+
+# choose k, number of clusters 
+cluster <- cutree(hc_full, k=4)
+
+# add cluster to original data 
+full_set <- cbind(full_set, as.factor(cluster))
+
+names(full_set)[names(full_set) == 'as.factor(cluster)'] <- 'cluster_label'
+
+# create individual clusters
+for(i in unique(full_set$cluster_label)){
+  nam <- paste("cluster", i, sep = "")
+  assign(nam, full_set[full_set$cluster_label == 1,])
+}
+
+
+
+```
+
+
+
+```{r}
+
+# Immune score data
+estimate_scores <- read.delim("breast_cancer_RNAseqV2.txt")
+
+estimate_scores$ID <- substring(estimate_scores$ID, 1, 12)
+
+# Find duplicates
+dup <- estimate_scores$ID[duplicated(estimate_scores$ID)]
+
+dup_all <- estimate_scores[estimate_scores$ID %in% dup,]
+
+# Remove duplicated
+estimate_scores <- estimate_scores[!(estimate_scores$ID %in% dup),]
+
+# Get mean of duplicates
+dup_mean <- dup_all %>% group_by(ID) %>% 
+            summarise(Immune_score.mean = mean(Immune_score))
+
+# Set column names
+names(dup_mean) <- c("estimate_scores.ID", "estimate_scores.Immune_score")
+
+# Create immune scores data
+immune_score <- data.frame(estimate_scores$ID, estimate_scores$Immune_score)
+
+# Add average back for duplicates
+immune_score <- rbind(immune_score, dup_mean)
+
+# Set to binary
+ave <- mean(immune_score$estimate_scores.Immune_score)
+  
+immune_score <- immune_score %>% 
+  mutate(immune_score.binary = if_else(estimate_scores.Immune_score > ave, 1, 0))
+
+immune.scores <- immune_score$immune_score.binary
+
+# Plot density
+locmodes(immune_score$estimate_scores.Immune_score, mod0=2, display=TRUE)
+
+# Check with clinical data
+new_data <- merge(clin, immune_score, by.x = "submitter_id", by.y = "estimate_scores.ID")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
